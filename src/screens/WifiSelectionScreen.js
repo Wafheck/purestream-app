@@ -71,37 +71,45 @@ const WifiSelectionScreen = ({ navigation }) => {
     setLoading(true);
     
     try {
-      // Try to connect to the ESP8266 WiFi (open network, no password)
-      await WifiManager.connectToProtectedSSID(
-        network.ssid,
-        "", // Empty password for open network
-        false, // Not WEP
-        false  // Not hidden
-      );
+      // CORRECT METHOD: Used specifically for open networks without passwords
+      await WifiManager.connectToSSID(network.ssid);
       
-      // Give the phone time to connect
+      // Give the phone time to finalize the Wi-Fi connection
       await new Promise(resolve => setTimeout(resolve, 3000));
       
-      // Test connection by trying to fetch from ESP8266
-      try {
-        const response = await fetch('http://192.168.4.1/data', {
-          method: 'GET',
-          timeout: 5000,
-        });
-        
-        if (response.ok) {
-          console.log('Successfully connected to ESP8266!');
-          await AsyncStorage.setItem('esp8266_ssid', network.ssid);
-          setLoading(false);
-          navigation.navigate('Dashboard');
-        } else {
-          throw new Error('ESP8266 not responding');
+      // Aggressive retry logic with AbortController to bypass ESP8266 hardware delays
+      let connectionSuccessful = false;
+      for (let i = 0; i < 5; i++) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 1000);
+
+          const response = await fetch('http://192.168.4.1/data', {
+            method: 'GET',
+            signal: controller.signal
+          });
+          
+          clearTimeout(timeoutId);
+
+          if (response.ok) {
+            connectionSuccessful = true;
+            break; // Exit the loop as soon as we get a response
+          }
+        } catch (fetchError) {
+          // Wait 250ms before the next attempt
+          await new Promise(resolve => setTimeout(resolve, 250));
         }
-      } catch (fetchError) {
-        console.error('ESP8266 not responding:', fetchError);
-        Alert.alert('Connection Failed', 'Connected to WiFi but ESP8266 not responding.\n\nMake sure:\n1. ESP8266 is powered on\n2. It\'s broadcasting "' + network.ssid + '"\n3. The IP is 192.168.4.1');
-        setLoading(false);
       }
+
+      if (connectionSuccessful) {
+        console.log('Successfully connected to ESP8266!');
+        await AsyncStorage.setItem('esp8266_ssid', network.ssid);
+        setLoading(false);
+        navigation.navigate('Dashboard');
+      } else {
+        throw new Error('ESP8266 not responding after 5 attempts');
+      }
+      
     } catch (error) {
       setLoading(false);
       console.error('WiFi connection error:', error);
