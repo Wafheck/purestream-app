@@ -1,62 +1,124 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-    View,
-    Text,
-    StyleSheet,
-    ScrollView,
-    TouchableOpacity,
-    Dimensions,
     Alert,
+    Dimensions,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 
+const ESP8266_IP = 'http://192.168.4.1';  // Default ESP8266 AP IP
+
 const DashboardScreen = ({ navigation }) => {
     const [sensorData, setSensorData] = useState({
-        tds: 245,
-        temperature: 23.5,
+        tds: 0,
+        temperature: 0,
+        turbidity: 0,
         relayHeater: false,
         relayUVC: false,
     });
 
-    const [tdsHistory, setTdsHistory] = useState([220, 225, 230, 235, 240, 245, 45, 21, 119]);
-    const [tempHistory, setTempHistory] = useState([22.5, 22.8, 23.0, 23.2, 23.3, 23.5]);
+    const [tdsHistory, setTdsHistory] = useState([0, 0, 0, 0, 0, 0]);
+    const [tempHistory, setTempHistory] = useState([0, 0, 0, 0, 0, 0]);
+    const [connected, setConnected] = useState(false);
 
     useEffect(() => {
+        // Fetch data every 2 seconds
         const interval = setInterval(() => {
-            updateSensorData();
-        }, 500);
+            fetchSensorData();
+        }, 2000);
+        
+        // Initial fetch
+        fetchSensorData();
+        
         return () => clearInterval(interval);
     }, []);
 
-    const updateSensorData = () => {
-        const newTds = Math.floor(Math.random() * 50) + 220;
-        const newTemp = (Math.random() * 2 + 22).toFixed(1);
-
-        setSensorData(prev => ({
-            ...prev,
-            tds: newTds,
-            temperature: parseFloat(newTemp),
-        }));
-
-        setTdsHistory(prev => [...prev.slice(1), newTds]);
-        setTempHistory(prev => [...prev.slice(1), parseFloat(newTemp)]);
+    const fetchSensorData = async () => {
+        try {
+            const response = await fetch(`${ESP8266_IP}/data`, {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                },
+                timeout: 5000,
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                console.log('Received data:', data);
+                
+                setSensorData({
+                    tds: data.tds || 0,
+                    temperature: data.temperature || 0,
+                    turbidity: data.turbidity || 0,
+                    relayHeater: data.heaterState || false,
+                    relayUVC: data.uvcState || false,
+                });
+                
+                // Update history
+                setTdsHistory(prev => [...prev.slice(1), data.tds || 0]);
+                setTempHistory(prev => [...prev.slice(1), data.temperature || 0]);
+                
+                setConnected(true);
+            } else {
+                console.error('Failed to fetch data:', response.status);
+                setConnected(false);
+            }
+        } catch (error) {
+            console.error('Error fetching sensor data:', error);
+            setConnected(false);
+        }
     };
 
-    const toggleHeater = () => {
-        setSensorData(prev => ({
-            ...prev,
-            relayHeater: !prev.relayHeater,
-        }));
-        Alert.alert('Heater Toggled', `Heater is now ${!sensorData.relayHeater ? 'ON' : 'OFF'}`);
+    const toggleHeater = async () => {
+        const newState = !sensorData.relayHeater;
+        
+        try {
+            const response = await fetch(`${ESP8266_IP}/heater?state=${newState ? 'on' : 'off'}`, {
+                method: 'POST',
+            });
+            
+            if (response.ok) {
+                setSensorData(prev => ({
+                    ...prev,
+                    relayHeater: newState,
+                }));
+                Alert.alert('Heater Toggled', `Heater is now ${newState ? 'ON' : 'OFF'}`);
+            } else {
+                Alert.alert('Error', 'Failed to toggle heater');
+            }
+        } catch (error) {
+            console.error('Error toggling heater:', error);
+            Alert.alert('Connection Error', 'Could not communicate with ESP8266');
+        }
     };
 
-    const toggleUVC = () => {
-        setSensorData(prev => ({
-            ...prev,
-            relayUVC: !prev.relayUVC,
-        }));
-        Alert.alert('UV-C LED Toggled', `UVC is now ${!sensorData.relayUVC ? 'ON' : 'OFF'}`);
-    }
+    const toggleUVC = async () => {
+        const newState = !sensorData.relayUVC;
+        
+        try {
+            const response = await fetch(`${ESP8266_IP}/uvc?state=${newState ? 'on' : 'off'}`, {
+                method: 'POST',
+            });
+            
+            if (response.ok) {
+                setSensorData(prev => ({
+                    ...prev,
+                    relayUVC: newState,
+                }));
+                Alert.alert('UV-C LED Toggled', `UVC is now ${newState ? 'ON' : 'OFF'}`);
+            } else {
+                Alert.alert('Error', 'Failed to toggle UVC');
+            }
+        } catch (error) {
+            console.error('Error toggling UVC:', error);
+            Alert.alert('Connection Error', 'Could not communicate with ESP8266');
+        }
+    };
 
     const getTDSStatus = (tds) => {
         if (tds < 100) return { text: 'Excellent', color: '#27AE60' };
@@ -70,7 +132,12 @@ const DashboardScreen = ({ navigation }) => {
     return (
         <ScrollView style={styles.container}>
             <View style={styles.header}>
-                <Text style={styles.headerTitle}>PureStream Dashboard</Text>
+                <View>
+                    <Text style={styles.headerTitle}>PureStream Dashboard</Text>
+                    <Text style={styles.connectionStatus}>
+                        {connected ? '🟢 Connected' : '🔴 Disconnected'}
+                    </Text>
+                </View>
                 <TouchableOpacity onPress={() => navigation.goBack()} style={styles.disconnectButton}>
                     <Text style={styles.disconnectText}>Disconnect</Text>
                 </TouchableOpacity>
@@ -88,13 +155,13 @@ const DashboardScreen = ({ navigation }) => {
 
                 <View style={[styles.card, { backgroundColor: '#E74C3C' }]}>
                     <Text style={styles.cardLabel}>Temperature</Text>
-                    <Text style={styles.cardValue}>{sensorData.temperature}</Text>
+                    <Text style={styles.cardValue}>{sensorData.temperature.toFixed(1)}</Text>
                     <Text style={styles.cardUnit}>°C</Text>
                 </View>
 
                 <View style={[styles.card, { backgroundColor: '#3498DB' }]}>
                     <Text style={styles.cardLabel}>Turbidity</Text>
-                    <Text style={styles.cardValue}>1</Text>
+                    <Text style={styles.cardValue}>{sensorData.turbidity.toFixed(1)}</Text>
                     <Text style={styles.cardUnit}>NTU</Text>
                 </View>
             </View>
@@ -104,7 +171,7 @@ const DashboardScreen = ({ navigation }) => {
                 <LineChart
                     data={{
                         labels: ['', '', '', '', '', ''],
-                        datasets: [{ data: tdsHistory }],
+                        datasets: [{ data: tdsHistory.length > 0 ? tdsHistory : [0] }],
                     }}
                     width={Dimensions.get('window').width - 70}
                     height={220}
@@ -131,7 +198,7 @@ const DashboardScreen = ({ navigation }) => {
                 <LineChart
                     data={{
                         labels: ['', '', '', '', '', ''],
-                        datasets: [{ data: tempHistory }],
+                        datasets: [{ data: tempHistory.length > 0 ? tempHistory : [0] }],
                     }}
                     width={Dimensions.get('window').width - 70}
                     height={220}
@@ -163,6 +230,7 @@ const DashboardScreen = ({ navigation }) => {
                 </TouchableOpacity>
                 <Text style={styles.relayStatus}>Status: {sensorData.relayHeater ? 'Running' : 'Stopped'}</Text>
             </View>
+            
             <View style={styles.relayContainer}>
                 <Text style={styles.relayTitle}>UVC LED Control</Text>
                 <TouchableOpacity
@@ -194,6 +262,11 @@ const styles = StyleSheet.create({
         fontSize: 24,
         fontWeight: 'bold',
         color: '#fff',
+    },
+    connectionStatus: {
+        fontSize: 12,
+        color: '#fff',
+        marginTop: 5,
     },
     disconnectButton: {
         backgroundColor: '#E74C3C',
