@@ -1,9 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
     FlatList,
+    Linking,
     PermissionsAndroid,
     Platform,
     StyleSheet,
@@ -13,12 +14,14 @@ import {
 } from 'react-native';
 import WifiManager from 'react-native-wifi-reborn';
 
-// BULLETPROOF TIMEOUT HELPER: Uses Promise.race instead of AbortController to avoid crashes
-const fetchWithTimeout = (url, options = {}, timeoutMs = 1500) => {
+const ESP8266_IP = 'http://192.168.4.1';
+
+// Timeout helper using Promise.race
+const fetchWithTimeout = (url, options = {}, timeoutMs = 2000) => {
   return Promise.race([
     fetch(url, options),
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Timeout: ESP8266 took too long')), timeoutMs)
+      setTimeout(() => reject(new Error('Timeout')), timeoutMs)
     )
   ]);
 };
@@ -27,9 +30,15 @@ const WifiSelectionScreen = ({ navigation }) => {
   const [wifiList, setWifiList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [waitingForManual, setWaitingForManual] = useState(false);
+  const pollRef = useRef(null);
 
   useEffect(() => {
     requestLocationPermission();
+    return () => {
+      // Cleanup poll on unmount
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
   }, []);
 
   const requestLocationPermission = async () => {
@@ -61,13 +70,13 @@ const WifiSelectionScreen = ({ navigation }) => {
     try {
       const networks = await WifiManager.reScanAndLoadWifiList();
       console.log('Found networks:', networks);
-      
+
       const formattedNetworks = networks.map(network => ({
         ssid: network.SSID,
         level: network.level,
         secured: network.capabilities.includes('WPA') || network.capabilities.includes('WEP'),
       }));
-      
+
       setWifiList(formattedNetworks);
       setScanning(false);
     } catch (error) {
@@ -77,69 +86,120 @@ const WifiSelectionScreen = ({ navigation }) => {
     }
   };
 
+  // Try to reach the ESP8266 API
+  const verifyESP8266Connection = async () => {
+    try {
+      const response = await fetchWithTimeout(
+        `${ESP8266_IP}/data`,
+        { method: 'GET', headers: { Accept: 'application/json' } },
+        2000
+      );
+      return response.ok;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  // Attempt programmatic connection first, then fall back to manual
   const connectToWifi = async (network) => {
     setLoading(true);
-    
+
     try {
-      // 1. Connect to the ESP8266 WiFi network
+      // 1. Force WiFi usage BEFORE connecting (some Android versions need this order)
+      try {
+        await WifiManager.forceWifiUsage(true);
+      } catch (e) {
+        console.log('forceWifiUsage pre-connect failed (non-fatal):', e);
+      }
+
+      // 2. Connect to the ESP8266 WiFi network
       await WifiManager.connectToProtectedSSID(network.ssid, "", false, false);
-      
-      // 2. CRITICAL: Force Android to route traffic through WiFi, not mobile data.
-      //    Without this, Android 10+ sees the ESP8266 AP has no internet and
-      //    silently routes all HTTP requests through LTE instead.
-      await WifiManager.forceWifiUsage(true);
-      
-      // 3. Wait for Android to finalize the connection
+
+      // 3. Force WiFi usage AFTER connecting too
+      try {
+        await WifiManager.forceWifiUsage(true);
+      } catch (e) {
+        console.log('forceWifiUsage post-connect failed (non-fatal):', e);
+      }
+
+      // 4. Wait for connection to stabilize
       await new Promise(resolve => setTimeout(resolve, 4000));
-      
-      // 4. Retry loop (5 attempts)
+
+      // 5. Try to reach ESP8266 (8 attempts with increasing delays)
       let connectionSuccessful = false;
-      let lastError = null;
 
-      for (let i = 0; i < 5; i++) {
-        try {
-          const response = await fetchWithTimeout(
-            'http://192.168.4.1/data',
-            { method: 'GET', headers: { Accept: 'application/json' } },
-            1500 // Wait 1.5 seconds max per attempt
-          );
-
-          if (response.ok) {
-            connectionSuccessful = true;
-            break; 
-          } else {
-            lastError = new Error('HTTP status ' + response.status);
-          }
-        } catch (e) {
-          lastError = e;
+      for (let i = 0; i < 8; i++) {
+        console.log(`ESP8266 connection attempt ${i + 1}/8...`);
+        if (await verifyESP8266Connection()) {
+          connectionSuccessful = true;
+          break;
         }
-        
-        // Wait 300ms before next attempt
-        await new Promise(resolve => setTimeout(resolve, 300));
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
 
-      // 5. Handle Results
-      if (!connectionSuccessful) {
-        // Release WiFi binding on failure
-        await WifiManager.forceWifiUsage(false);
-        throw lastError || new Error('ESP8266 not responding after retries');
+      if (connectionSuccessful) {
+        console.log('Successfully connected to ESP8266!');
+        await AsyncStorage.setItem('esp8266_ssid', network.ssid);
+        setLoading(false);
+        navigation.navigate('Dashboard');
+        return;
       }
 
-      console.log('Successfully connected to ESP8266!');
-      await AsyncStorage.setItem('esp8266_ssid', network.ssid);
+      // 6. Programmatic connection didn't route traffic — offer manual connect
       setLoading(false);
-      navigation.navigate('Dashboard');
-      
+      try { await WifiManager.forceWifiUsage(false); } catch (_) {}
+
+      Alert.alert(
+        'Manual Connection Needed',
+        `Your phone connected to ${network.ssid} but Android is blocking the app's network access.\n\nPlease tap "Connect Manually" below to open WiFi Settings and connect to "${network.ssid}" from there.`,
+        [{ text: 'OK' }]
+      );
+
     } catch (error) {
       setLoading(false);
-      // Release WiFi binding on error
       try { await WifiManager.forceWifiUsage(false); } catch (_) {}
       console.error('WiFi connection error:', error);
       Alert.alert(
-        'Connection Failed', 
-        `Could not connect to ${network.ssid}\n\nError: ${String(error?.message || error)}`
+        'Connection Failed',
+        `Could not connect to ${network.ssid}\n\nTap "Connect Manually" below to connect from WiFi Settings instead.`,
+        [{ text: 'OK' }]
       );
     }
+  };
+
+  // Open WiFi Settings and poll for ESP8266 connectivity
+  const connectManually = async () => {
+    setWaitingForManual(true);
+
+    // Open Android WiFi Settings
+    try {
+      await Linking.sendIntent('android.settings.WIFI_SETTINGS');
+    } catch (e) {
+      // Fallback
+      Linking.openSettings();
+    }
+
+    // Poll every 2 seconds to detect when user has connected
+    pollRef.current = setInterval(async () => {
+      console.log('Polling for ESP8266 connection...');
+      const reachable = await verifyESP8266Connection();
+      if (reachable) {
+        console.log('ESP8266 reachable! Navigating to Dashboard.');
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+        setWaitingForManual(false);
+        await AsyncStorage.setItem('esp8266_ssid', 'ESP8266_PureStream');
+        navigation.navigate('Dashboard');
+      }
+    }, 2000);
+  };
+
+  const cancelManualConnect = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setWaitingForManual(false);
   };
 
   const renderWifiItem = ({ item }) => (
@@ -174,7 +234,7 @@ const WifiSelectionScreen = ({ navigation }) => {
           keyExtractor={(item, index) => item.ssid + index}
           style={styles.list}
           ListEmptyComponent={
-            <Text style={styles.emptyText}>No networks found. Pull down to refresh.</Text>
+            <Text style={styles.emptyText}>No networks found. Tap Refresh below.</Text>
           }
         />
       )}
@@ -188,6 +248,22 @@ const WifiSelectionScreen = ({ navigation }) => {
           {scanning ? 'Scanning...' : 'Refresh Networks'}
         </Text>
       </TouchableOpacity>
+
+      <TouchableOpacity
+        style={styles.manualButton}
+        onPress={connectManually}
+        disabled={waitingForManual}
+      >
+        <Text style={styles.manualButtonText}>
+          {waitingForManual ? '⏳ Waiting for connection...' : '⚙️ Connect Manually (WiFi Settings)'}
+        </Text>
+      </TouchableOpacity>
+
+      {waitingForManual && (
+        <TouchableOpacity style={styles.cancelButton} onPress={cancelManualConnect}>
+          <Text style={styles.cancelButtonText}>Cancel</Text>
+        </TouchableOpacity>
+      )}
 
       {loading && (
         <View style={styles.connectingOverlay}>
@@ -211,6 +287,10 @@ const styles = StyleSheet.create({
   lockIcon: { marginLeft: 10 },
   refreshButton: { backgroundColor: '#4A90E2', padding: 16, borderRadius: 12, alignItems: 'center', marginTop: 10 },
   refreshButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  manualButton: { backgroundColor: '#2C3E50', padding: 16, borderRadius: 12, alignItems: 'center', marginTop: 10 },
+  manualButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  cancelButton: { backgroundColor: '#E74C3C', padding: 12, borderRadius: 12, alignItems: 'center', marginTop: 8 },
+  cancelButtonText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   loadingText: { marginTop: 10, fontSize: 16, color: '#7F8C8D' },
   emptyText: { textAlign: 'center', marginTop: 50, fontSize: 16, color: '#95A5A6' },
