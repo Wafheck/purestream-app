@@ -9,7 +9,6 @@ import {
     View,
 } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
-import WifiManager from 'react-native-wifi-reborn';
 
 const ESP8266_IP = 'http://192.168.4.1';  // Default ESP8266 AP IP
 
@@ -35,11 +34,7 @@ const DashboardScreen = ({ navigation }) => {
         // Initial fetch
         fetchSensorData();
         
-        return () => {
-            clearInterval(interval);
-            // Release WiFi binding when leaving dashboard
-            WifiManager.forceWifiUsage(false).catch(() => {});
-        };
+        return () => clearInterval(interval);
     }, []);
 
     const fetchSensorData = async () => {
@@ -143,10 +138,7 @@ const DashboardScreen = ({ navigation }) => {
                         {connected ? '🟢 Connected' : '🔴 Disconnected'}
                     </Text>
                 </View>
-                <TouchableOpacity onPress={async () => {
-                    try { await WifiManager.forceWifiUsage(false); } catch (_) {}
-                    navigation.goBack();
-                }} style={styles.disconnectButton}>
+                <TouchableOpacity onPress={() => navigation.goBack()} style={styles.disconnectButton}>
                     <Text style={styles.disconnectText}>Disconnect</Text>
                 </TouchableOpacity>
             </View>
