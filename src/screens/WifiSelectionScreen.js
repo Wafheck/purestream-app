@@ -81,13 +81,18 @@ const WifiSelectionScreen = ({ navigation }) => {
     setLoading(true);
     
     try {
-      // 1. Connect using your original, working method
+      // 1. Connect to the ESP8266 WiFi network
       await WifiManager.connectToProtectedSSID(network.ssid, "", false, false);
       
-      // 2. Wait 4 seconds for Android to finalize the connection
+      // 2. CRITICAL: Force Android to route traffic through WiFi, not mobile data.
+      //    Without this, Android 10+ sees the ESP8266 AP has no internet and
+      //    silently routes all HTTP requests through LTE instead.
+      await WifiManager.forceWifiUsage(true);
+      
+      // 3. Wait for Android to finalize the connection
       await new Promise(resolve => setTimeout(resolve, 4000));
       
-      // 3. Retry loop (5 attempts)
+      // 4. Retry loop (5 attempts)
       let connectionSuccessful = false;
       let lastError = null;
 
@@ -113,8 +118,10 @@ const WifiSelectionScreen = ({ navigation }) => {
         await new Promise(resolve => setTimeout(resolve, 300));
       }
 
-      // 4. Handle Results
+      // 5. Handle Results
       if (!connectionSuccessful) {
+        // Release WiFi binding on failure
+        await WifiManager.forceWifiUsage(false);
         throw lastError || new Error('ESP8266 not responding after retries');
       }
 
@@ -125,6 +132,8 @@ const WifiSelectionScreen = ({ navigation }) => {
       
     } catch (error) {
       setLoading(false);
+      // Release WiFi binding on error
+      try { await WifiManager.forceWifiUsage(false); } catch (_) {}
       console.error('WiFi connection error:', error);
       Alert.alert(
         'Connection Failed', 
